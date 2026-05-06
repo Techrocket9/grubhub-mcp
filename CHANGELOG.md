@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.1.4 (2026-05-06)
+
+### Bug Fixes
+
+- Harden auth guards and order history fallbacks
+  ([`4a8ca08`](https://github.com/aserper/grubhub-mcp/commit/4a8ca08303faac31708f7135318a513a3c3859e4))
+
+
 ## v1.1.3 (2026-03-24)
 
 ### Bug Fixes
