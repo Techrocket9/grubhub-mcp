@@ -65,6 +65,10 @@ class FakeClient:
         params: dict | None = None,
     ):
         self.post_calls.append((path, data, auth_required, params))
+        if path.startswith("/orders/") and path.endswith("/reorder"):
+            request = httpx.Request("POST", f"https://api-gtm.grubhub.com{path}")
+            response = httpx.Response(404, request=request)
+            raise httpx.HTTPStatusError("not found", request=request, response=response)
         if path == "/carts":
             return {"id": "cart-123", "already_exists": False}
         raise AssertionError(f"unexpected POST path: {path}")
@@ -185,6 +189,43 @@ class AuthAndOrdersTests(unittest.IsolatedAsyncioTestCase):
         data = json.loads(raw)
         self.assertEqual(data["id"], "order-2")
         self.assertEqual(data["group_id"], "group-2")
+
+    async def test_reorder_falls_back_to_cart_reconstruction_on_404(self):
+        history_orders = [
+            {
+                "id": "order-2",
+                "group_id": "group-2",
+                "restaurants": [{"id": "2056994"}],
+                "fulfillment_info": {"type": "PICKUP"},
+                "charges": {
+                    "lines": {
+                        "line_items": [
+                            {
+                                "menu_item_id": "324325110600",
+                                "quantity": 1,
+                                "options": [{"id": "324325089912", "quantity": 1}],
+                            }
+                        ]
+                    }
+                },
+            }
+        ]
+        client = FakeClient(history_orders=history_orders)
+        mcp = FakeMCP()
+        order_tools.register(mcp)
+
+        with patch("src.grubhub_mcp.tools.order.get_client", return_value=client):
+            raw = await mcp.tools["reorder"]("group-2")
+
+        data = json.loads(raw)
+        self.assertEqual(data["id"], "cart-123")
+        self.assertEqual(client.post_calls[0][0], "/orders/group-2/reorder")
+        self.assertEqual(client.post_calls[1][0], "/carts")
+        payload = client.post_calls[1][1]
+        assert payload is not None
+        self.assertEqual(payload["restaurant_id"], "2056994")
+        self.assertEqual(payload["order_type"], "PICKUP")
+        self.assertEqual(payload["line_items"][0]["menu_item_id"], "324325110600")
 
 
 if __name__ == "__main__":
