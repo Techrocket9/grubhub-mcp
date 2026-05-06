@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.1.5 (2026-05-06)
+
+### Bug Fixes
+
+- Harden cart creation and auth error handling
+  ([`876d946`](https://github.com/aserper/grubhub-mcp/commit/876d9466000c47257a30573cb8ff1faa799a0a52))
+
+
 ## v1.1.4 (2026-05-06)
 
 ### Bug Fixes
