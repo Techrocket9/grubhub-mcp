@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.1.6 (2026-05-06)
+
+### Bug Fixes
+
+- Reconstruct reorder carts from order history
+  ([`7c40515`](https://github.com/aserper/grubhub-mcp/commit/7c40515eab25f0fc057d472ab3815892526c37ca))
+
+
 ## v1.1.5 (2026-05-06)
 
 ### Bug Fixes
