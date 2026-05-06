@@ -80,6 +80,10 @@ async def verify_otp(client: GrubhubClient, email: str, code: str) -> dict[str, 
     }
     data = await client.put("/auth/confirmation_code", data=payload, auth_required=True)
     client.session.set_authenticated(data)
+    if not client.session.diner_udid:
+        # OTP responses sometimes omit credential metadata; fall back to /session.
+        session_data = await get_session(client)
+        client.session.set_authenticated(session_data)
     return data
 
 

@@ -15,7 +15,7 @@ def register(mcp: FastMCP) -> None:
     async def get_payment_methods() -> str:
         """Get saved payment methods. Requires authentication."""
         client = get_client()
-        if not client.session.is_authenticated:
+        if not client.session.is_authenticated or not client.session.diner_udid:
             return json.dumps({"error": "Must be logged in to view payment methods"})
 
         data = await client.get(

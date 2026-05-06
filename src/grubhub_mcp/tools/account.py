@@ -65,7 +65,7 @@ def register(mcp: FastMCP) -> None:
     async def get_addresses() -> str:
         """Get saved delivery addresses. Requires authentication."""
         client = get_client()
-        if not client.session.is_authenticated:
+        if not client.session.is_authenticated or not client.session.diner_udid:
             return json.dumps({"error": "Must be logged in to view addresses"})
 
         data = await client.get(
@@ -95,7 +95,7 @@ def register(mcp: FastMCP) -> None:
             label: Label for the address (e.g. Home, Work)
         """
         client = get_client()
-        if not client.session.is_authenticated:
+        if not client.session.is_authenticated or not client.session.diner_udid:
             return json.dumps({"error": "Must be logged in to add addresses"})
 
         payload: dict[str, Any] = {
@@ -121,7 +121,7 @@ def register(mcp: FastMCP) -> None:
     async def get_favorites() -> str:
         """Get favorite/saved restaurants. Requires authentication."""
         client = get_client()
-        if not client.session.is_authenticated:
+        if not client.session.is_authenticated or not client.session.diner_udid:
             return json.dumps({"error": "Must be logged in to view favorites"})
 
         data = await client.get(
@@ -137,7 +137,7 @@ def register(mcp: FastMCP) -> None:
             restaurant_id: The restaurant ID to favorite
         """
         client = get_client()
-        if not client.session.is_authenticated:
+        if not client.session.is_authenticated or not client.session.diner_udid:
             return json.dumps({"error": "Must be logged in"})
 
         data = await client.post(
@@ -154,7 +154,7 @@ def register(mcp: FastMCP) -> None:
             restaurant_id: The restaurant ID to unfavorite
         """
         client = get_client()
-        if not client.session.is_authenticated:
+        if not client.session.is_authenticated or not client.session.diner_udid:
             return json.dumps({"error": "Must be logged in"})
 
         data = await client.delete(
