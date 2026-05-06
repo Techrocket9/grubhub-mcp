@@ -7,6 +7,8 @@ from unittest.mock import patch
 import httpx
 
 from src.grubhub_mcp import auth as auth_module
+from src.grubhub_mcp.tools import auth as auth_tools
+from src.grubhub_mcp.tools import cart as cart_tools
 from src.grubhub_mcp.tools import order as order_tools
 
 
@@ -32,6 +34,7 @@ class FakeClient:
         self.history_orders = history_orders or []
         self.put_calls: list[tuple[str, dict, bool]] = []
         self.get_calls: list[tuple[str, dict | None, bool]] = []
+        self.post_calls: list[tuple[str, dict | None, bool, dict | None]] = []
 
     async def put(self, path: str, data: dict | None = None, auth_required: bool = True):
         self.put_calls.append((path, data or {}, auth_required))
@@ -53,6 +56,18 @@ class FakeClient:
         if path == f"/diners/{self.session.diner_udid}/orders":
             return {"orders": self.history_orders}
         raise AssertionError(f"unexpected GET path: {path}")
+
+    async def post(
+        self,
+        path: str,
+        data: dict | None = None,
+        auth_required: bool = True,
+        params: dict | None = None,
+    ):
+        self.post_calls.append((path, data, auth_required, params))
+        if path == "/carts":
+            return {"id": "cart-123", "already_exists": False}
+        raise AssertionError(f"unexpected POST path: {path}")
 
 
 class FakeMCP:
@@ -77,6 +92,55 @@ class AuthAndOrdersTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.session.diner_udid, "otp-diner-456")
         self.assertEqual(client.get_calls[0][0], "/session")
 
+    async def test_verify_login_otp_maps_401_to_friendly_error(self):
+        client = FakeClient()
+        mcp = FakeMCP()
+        auth_tools.register(mcp)
+        request = httpx.Request("PUT", "https://api-gtm.grubhub.com/auth/confirmation_code")
+        response = httpx.Response(401, request=request)
+
+        with (
+            patch("src.grubhub_mcp.tools.auth.get_client", return_value=client),
+            patch(
+                "src.grubhub_mcp.tools.auth.auth_module.verify_otp",
+                side_effect=httpx.HTTPStatusError("unauthorized", request=request, response=response),
+            ),
+        ):
+            raw = await mcp.tools["verify_login_otp"]("user@example.com", "000000")
+
+        data = json.loads(raw)
+        self.assertEqual(
+            data,
+            {"error": "OTP expired or invalid — request a new code with send_login_otp"},
+        )
+
+    async def test_create_cart_omits_invalid_when_for_payload_field(self):
+        client = FakeClient()
+        mcp = FakeMCP()
+        cart_tools.register(mcp)
+
+        with patch("src.grubhub_mcp.tools.cart.get_client", return_value=client):
+            raw = await mcp.tools["create_cart"](
+                restaurant_id="11278616",
+                menu_item_id="322296812576",
+                quantity=1,
+                latitude=42.3601,
+                longitude=-71.0589,
+                is_delivery=True,
+            )
+
+        data = json.loads(raw)
+        self.assertEqual(data["id"], "cart-123")
+        self.assertEqual(len(client.post_calls), 1)
+        path, payload, auth_required, params = client.post_calls[0]
+        self.assertEqual(path, "/carts")
+        self.assertTrue(auth_required)
+        self.assertIsNone(params)
+        assert payload is not None
+        self.assertNotIn("when_for", payload)
+        self.assertEqual(payload["order_type"], "DELIVERY")
+        self.assertEqual(payload["restaurant_id"], "11278616")
+
     async def test_get_order_history_paginates_client_side(self):
         history_orders = [
             {"id": f"order-{i}", "group_id": f"group-{i}"} for i in range(5)
@@ -92,6 +156,19 @@ class AuthAndOrdersTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([o["id"] for o in data["orders"]], ["order-2", "order-3"])
         self.assertEqual(data["pagination"]["total_orders"], 5)
         self.assertEqual(data["pagination"]["returned"], 2)
+
+    async def test_get_order_returns_friendly_auth_error_when_logged_out(self):
+        client = FakeClient(history_orders=[])
+        client.session.is_authenticated = False
+        client.session.diner_udid = None
+        mcp = FakeMCP()
+        order_tools.register(mcp)
+
+        with patch("src.grubhub_mcp.tools.order.get_client", return_value=client):
+            raw = await mcp.tools["get_order"]("order-1")
+
+        data = json.loads(raw)
+        self.assertEqual(data, {"error": "Must be logged in to view order details"})
 
     async def test_get_order_falls_back_to_history_lookup_on_404(self):
         history_orders = [

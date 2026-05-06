@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import httpx
 from mcp.server.fastmcp import FastMCP
 
 from ..client import get_client
@@ -12,6 +13,12 @@ from ..client import get_client
 
 async def _fetch_order_history_raw(client: Any) -> dict[str, Any]:
     return await client.get(f"/diners/{client.session.diner_udid}/orders")
+
+
+def _require_authenticated(client: Any, action: str) -> str | None:
+    if not client.session.is_authenticated or not client.session.diner_udid:
+        return json.dumps({"error": f"Must be logged in to {action}"})
+    return None
 
 
 def _paginate_orders(data: dict[str, Any], page_size: int, page_num: int) -> dict[str, Any]:
@@ -51,8 +58,9 @@ def register(mcp: FastMCP) -> None:
             tip_amount: Optional tip amount in dollars
         """
         client = get_client()
-        if not client.session.is_authenticated:
-            return json.dumps({"error": "Must be logged in to place an order"})
+        auth_error = _require_authenticated(client, "place an order")
+        if auth_error:
+            return auth_error
 
         payload: dict[str, Any] = {}
         if payment_method_id:
@@ -71,11 +79,13 @@ def register(mcp: FastMCP) -> None:
             order_id: The order ID
         """
         client = get_client()
+        auth_error = _require_authenticated(client, "view order details")
+        if auth_error:
+            return auth_error
         try:
             data = await client.get(f"/orders/{order_id}")
-        except Exception as exc:
-            status_code = getattr(getattr(exc, "response", None), "status_code", None)
-            if status_code != 404 or not client.session.is_authenticated or not client.session.diner_udid:
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
                 raise
 
             history = await _fetch_order_history_raw(client)
@@ -102,8 +112,9 @@ def register(mcp: FastMCP) -> None:
             page_num: Page number (default 0)
         """
         client = get_client()
-        if not client.session.is_authenticated or not client.session.diner_udid:
-            return json.dumps({"error": "Must be logged in to view order history"})
+        auth_error = _require_authenticated(client, "view order history")
+        if auth_error:
+            return auth_error
 
         data = await _fetch_order_history_raw(client)
         data = _paginate_orders(data, page_size=page_size, page_num=page_num)
@@ -117,6 +128,9 @@ def register(mcp: FastMCP) -> None:
             order_id: The order ID to track
         """
         client = get_client()
+        auth_error = _require_authenticated(client, "track an order")
+        if auth_error:
+            return auth_error
         data = await client.get(f"/orders/{order_id}/tracking")
         return json.dumps(data, indent=2)
 
@@ -128,8 +142,9 @@ def register(mcp: FastMCP) -> None:
             order_id: The order ID to reorder
         """
         client = get_client()
-        if not client.session.is_authenticated:
-            return json.dumps({"error": "Must be logged in to reorder"})
+        auth_error = _require_authenticated(client, "reorder")
+        if auth_error:
+            return auth_error
 
         data = await client.post(f"/orders/{order_id}/reorder")
         return json.dumps(data, indent=2)
@@ -143,6 +158,9 @@ def register(mcp: FastMCP) -> None:
             tip_amount: Tip amount in dollars
         """
         client = get_client()
+        auth_error = _require_authenticated(client, "add a post-delivery tip")
+        if auth_error:
+            return auth_error
         data = await client.post(
             f"/orders/{order_id}/tip",
             data={"tip_amount": int(tip_amount * 100)},

@@ -50,9 +50,8 @@ def register(mcp: FastMCP) -> None:
             "restaurant_id": restaurant_id,
             "line_items": [line_item],
             "order_type": "DELIVERY" if is_delivery else "PICKUP",
-            "when_for": "ASAP",
         }
-        if latitude and longitude:
+        if latitude is not None and longitude is not None:
             payload["location"] = {
                 "latitude": latitude,
                 "longitude": longitude,
