@@ -2,16 +2,47 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from ..client import get_client
+from ._common import handle_api_errors, json_result, require_int, to_cents
+
+MAX_QUANTITY = 100
+
+
+def _build_line_item(
+    menu_item_id: str,
+    quantity: int,
+    special_instructions: str,
+    options: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    line_item: dict[str, Any] = {
+        "menu_item_id": menu_item_id,
+        "quantity": require_int(
+            quantity, "quantity", minimum=1, maximum=MAX_QUANTITY
+        ),
+    }
+    if special_instructions:
+        line_item["special_instructions"] = special_instructions
+    if options:
+        line_item["options"] = options
+    return line_item
 
 
 def register(mcp: FastMCP) -> None:
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Create cart",
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=True,
+        )
+    )
+    @handle_api_errors
     async def create_cart(
         restaurant_id: str,
         menu_item_id: str,
@@ -22,7 +53,8 @@ def register(mcp: FastMCP) -> None:
         longitude: float | None = None,
         is_delivery: bool = True,
     ) -> str:
-        """Create a new cart with the first item.
+        """Create a new cart with the first item. Nothing is charged until
+        place_order is called.
 
         Args:
             restaurant_id: The restaurant ID to order from
@@ -36,14 +68,9 @@ def register(mcp: FastMCP) -> None:
         """
         client = get_client()
 
-        line_item: dict[str, Any] = {
-            "menu_item_id": menu_item_id,
-            "quantity": quantity,
-        }
-        if special_instructions:
-            line_item["special_instructions"] = special_instructions
-        if options:
-            line_item["options"] = options
+        line_item = _build_line_item(
+            menu_item_id, quantity, special_instructions, options
+        )
 
         payload: dict[str, Any] = {
             "brand": "GRUBHUB",
@@ -58,9 +85,17 @@ def register(mcp: FastMCP) -> None:
             }
 
         data = await client.post("/carts", data=payload)
-        return json.dumps(data, indent=2)
+        return json_result(data)
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Get cart",
+            readOnlyHint=True,
+            idempotentHint=True,
+            openWorldHint=True,
+        )
+    )
+    @handle_api_errors
     async def get_cart(cart_id: str) -> str:
         """Get the current state of a cart including items, totals, and fees.
 
@@ -69,9 +104,18 @@ def register(mcp: FastMCP) -> None:
         """
         client = get_client()
         data = await client.get(f"/carts/{cart_id}")
-        return json.dumps(data, indent=2)
+        return json_result(data)
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Add item to cart",
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=True,
+        )
+    )
+    @handle_api_errors
     async def add_to_cart(
         cart_id: str,
         menu_item_id: str,
@@ -79,7 +123,8 @@ def register(mcp: FastMCP) -> None:
         special_instructions: str = "",
         options: list[dict[str, Any]] | None = None,
     ) -> str:
-        """Add an item to an existing cart.
+        """Add an item to an existing cart. Nothing is charged until
+        place_order is called.
 
         Args:
             cart_id: The cart ID to add to
@@ -90,39 +135,49 @@ def register(mcp: FastMCP) -> None:
         """
         client = get_client()
 
-        line_item: dict[str, Any] = {
-            "menu_item_id": menu_item_id,
-            "quantity": quantity,
-        }
-        if special_instructions:
-            line_item["special_instructions"] = special_instructions
-        if options:
-            line_item["options"] = options
-
-        data = await client.post(
-            f"/carts/{cart_id}/line_items", data=line_item
+        line_item = _build_line_item(
+            menu_item_id, quantity, special_instructions, options
         )
-        return json.dumps(data, indent=2)
 
-    @mcp.tool()
-    async def update_cart_item(
-        cart_id: str, line_item_id: str, quantity: int
-    ) -> str:
+        data = await client.post(f"/carts/{cart_id}/line_items", data=line_item)
+        return json_result(data)
+
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Update cart item quantity",
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=True,
+            openWorldHint=True,
+        )
+    )
+    @handle_api_errors
+    async def update_cart_item(cart_id: str, line_item_id: str, quantity: int) -> str:
         """Update the quantity of an item in the cart.
 
         Args:
             cart_id: The cart ID
             line_item_id: The line item ID to update
-            quantity: New quantity (0 to remove)
+            quantity: New quantity (0 removes the item)
         """
         client = get_client()
+        quantity = require_int(quantity, "quantity", minimum=0, maximum=MAX_QUANTITY)
         data = await client.put(
             f"/carts/{cart_id}/line_items/{line_item_id}",
             data={"quantity": quantity},
         )
-        return json.dumps(data, indent=2)
+        return json_result(data)
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Remove item from cart",
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=True,
+            openWorldHint=True,
+        )
+    )
+    @handle_api_errors
     async def remove_from_cart(cart_id: str, line_item_id: str) -> str:
         """Remove an item from the cart.
 
@@ -131,12 +186,19 @@ def register(mcp: FastMCP) -> None:
             line_item_id: The line item ID to remove
         """
         client = get_client()
-        data = await client.delete(
-            f"/carts/{cart_id}/line_items/{line_item_id}"
-        )
-        return json.dumps(data, indent=2)
+        data = await client.delete(f"/carts/{cart_id}/line_items/{line_item_id}")
+        return json_result(data)
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Apply promo code",
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        )
+    )
+    @handle_api_errors
     async def apply_promo_code(cart_id: str, promo_code: str) -> str:
         """Apply a promotion code to the cart.
 
@@ -149,19 +211,29 @@ def register(mcp: FastMCP) -> None:
             f"/carts/{cart_id}/promotions",
             data={"promo_code": promo_code},
         )
-        return json.dumps(data, indent=2)
+        return json_result(data)
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Set cart tip",
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        )
+    )
+    @handle_api_errors
     async def set_tip(cart_id: str, tip_amount: float) -> str:
-        """Set the tip amount on the cart.
+        """Set the tip amount on the cart. Charged with the order when
+        place_order is called.
 
         Args:
             cart_id: The cart ID
-            tip_amount: Tip amount in dollars
+            tip_amount: Tip amount in dollars (e.g. 5.25)
         """
         client = get_client()
         data = await client.put(
             f"/carts/{cart_id}/tip",
-            data={"tip_amount": int(tip_amount * 100)},  # cents
+            data={"tip_amount": to_cents(tip_amount)},  # cents
         )
-        return json.dumps(data, indent=2)
+        return json_result(data)

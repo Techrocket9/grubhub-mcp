@@ -6,13 +6,24 @@ import json
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from ..client import get_client
-from .. import auth as auth_module
+from ._common import handle_api_errors, json_result, require_int
+
+MAX_PAGE_SIZE = 100
 
 
 def register(mcp: FastMCP) -> None:
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Search restaurants",
+            readOnlyHint=True,
+            idempotentHint=True,
+            openWorldHint=True,
+        )
+    )
+    @handle_api_errors
     async def search_restaurants(
         latitude: float,
         longitude: float,
@@ -22,20 +33,20 @@ def register(mcp: FastMCP) -> None:
         sort_type: str = "",
         location_mode: str = "DELIVERY",
     ) -> str:
-        """Search for restaurants near a location.
+        """Search for restaurants near a location. Read-only, no login needed.
 
         Args:
             latitude: Latitude of the delivery address
             longitude: Longitude of the delivery address
             query: Optional search query (cuisine, restaurant name, dish)
-            page_size: Number of results per page (default 20)
+            page_size: Number of results per page (default 20, max 100)
             page_num: Page number for pagination (1-based, default 1)
             sort_type: Optional sort — leave empty for default relevance
             location_mode: DELIVERY or PICKUP (default DELIVERY)
         """
         client = get_client()
-        if not client.session.auth_token:
-            await auth_module.create_anonymous_session(client)
+        page_size = require_int(page_size, "page_size", minimum=1, maximum=MAX_PAGE_SIZE)
+        page_num = require_int(page_num, "page_num", minimum=1)
 
         params: dict[str, Any] = {
             "location": f"POINT({longitude} {latitude})",
@@ -55,16 +66,24 @@ def register(mcp: FastMCP) -> None:
             params["sorts"] = json.dumps({"sortType": sort_type})
 
         data = await client.get("/restaurants/search/search_listing", params=params)
-        return json.dumps(data, indent=2)
+        return json_result(data)
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Autocomplete search",
+            readOnlyHint=True,
+            idempotentHint=True,
+            openWorldHint=True,
+        )
+    )
+    @handle_api_errors
     async def autocomplete_search(
         query: str,
         latitude: float,
         longitude: float,
         location_mode: str = "DELIVERY",
     ) -> str:
-        """Get autocomplete suggestions for a search query.
+        """Get autocomplete suggestions for a search query. Read-only.
 
         Args:
             query: The partial search text
@@ -73,8 +92,6 @@ def register(mcp: FastMCP) -> None:
             location_mode: DELIVERY or PICKUP (default DELIVERY)
         """
         client = get_client()
-        if not client.session.auth_token:
-            await auth_module.create_anonymous_session(client)
 
         params = [
             ("lat", latitude),
@@ -86,4 +103,4 @@ def register(mcp: FastMCP) -> None:
             ("resultTypeList", "dishTerm"),
         ]
         data = await client.get("/autocomplete", params=params)
-        return json.dumps(data, indent=2)
+        return json_result(data)
