@@ -40,6 +40,9 @@ find = { where = ["src"] }
 
 [tool.semantic_release]
 version_toml = ["pyproject.toml:project.version"]
+# Keep the Claude Code plugin manifest's version in lockstep with the package.
+# marketplace.json carries no version field, so there is nothing to stamp there.
+version_variables = [".claude-plugin/plugin.json:version"]
 assets = [".claude-plugin/plugin.json", ".claude-plugin/marketplace.json"]
 branch = "master"
 commit_parser = "angular"
