@@ -7,13 +7,15 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least privilege by default; only the release job needs write access.
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -44,6 +46,9 @@ jobs:
     needs: test
     # Releases only ever happen from master; PR builds stop after `test`.
     if: github.event_name != 'pull_request'
+    permissions:
+      contents: write
+      id-token: write
     concurrency: release
     env:
       # Exposed at job level so the publish step's `if` can test for it.
