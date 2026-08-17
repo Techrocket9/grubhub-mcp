@@ -28,20 +28,20 @@ An MCP (Model Context Protocol) server that provides programmatic access to Grub
 ### Claude Code Plugin (Recommended)
 
 ```bash
-claude plugin marketplace add aserper/grubhub-mcp
+claude plugin marketplace add Techrocket9/grubhub-mcp
 claude plugin install grubhub-mcp@grubhub-marketplace
 ```
 
 ### uvx (No Installation Required)
 
-Add to your Claude Code MCP settings (`~/.claude/settings.json`):
+This fork is not published to PyPI (the `grubhub-mcp` package there is the upstream project), so install straight from the repository. Add to your Claude Code MCP settings (`~/.claude/settings.json`):
 
 ```json
 {
   "mcpServers": {
     "grubhub": {
       "command": "uvx",
-      "args": ["--from", "grubhub-mcp", "grubhub"]
+      "args": ["--from", "git+https://github.com/Techrocket9/grubhub-mcp", "grubhub"]
     }
   }
 }
@@ -52,7 +52,7 @@ Add to your Claude Code MCP settings (`~/.claude/settings.json`):
 Requires Python 3.11+.
 
 ```bash
-git clone https://github.com/aserper/grubhub-mcp.git
+git clone https://github.com/Techrocket9/grubhub-mcp.git
 cd grubhub-mcp
 uv venv && source .venv/bin/activate
 uv pip install -e .
@@ -83,7 +83,7 @@ Run the server over stdio:
 
 ```bash
 # With uvx (no install needed)
-uvx --from grubhub-mcp grubhub
+uvx --from git+https://github.com/Techrocket9/grubhub-mcp grubhub
 
 # Or from a local install
 grubhub
@@ -107,7 +107,7 @@ Set the credentials as environment variables on the MCP server process and call 
   "mcpServers": {
     "grubhub": {
       "command": "uvx",
-      "args": ["--from", "grubhub-mcp", "grubhub"],
+      "args": ["--from", "git+https://github.com/Techrocket9/grubhub-mcp", "grubhub"],
       "env": {
         "GRUBHUB_EMAIL": "you@example.com",
         "GRUBHUB_PASSWORD": "your-password"

@@ -2,7 +2,7 @@
   "mcpServers": {
     "grubhub": {
       "command": "uvx",
-      "args": ["--from", "grubhub-mcp", "grubhub"]
+      "args": ["--from", "git+https://github.com/Techrocket9/grubhub-mcp", "grubhub"]
     }
   }
 }
