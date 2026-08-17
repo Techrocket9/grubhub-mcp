@@ -2,42 +2,116 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from ..client import get_client
+from ._common import (
+    error_result,
+    handle_api_errors,
+    json_result,
+    require_authenticated,
+    require_int,
+    to_cents,
+)
+
+# Upper bound on pages walked when scanning history for a single order, so a
+# malformed or ever-growing ``pager`` cannot spin forever.
+MAX_HISTORY_PAGES = 100
+MAX_HISTORY_PAGE_SIZE = 100
+DEFAULT_HISTORY_PAGE_SIZE = 20
+
+# Backwards-compatible alias used by other modules/tests.
+_require_authenticated = require_authenticated
 
 
-async def _fetch_order_history_raw(client: Any) -> dict[str, Any]:
-    return await client.get(f"/diners/{client.session.diner_udid}/orders")
+async def _fetch_order_history_raw(
+    client: Any, page_size: int = DEFAULT_HISTORY_PAGE_SIZE, page_num: int = 1
+) -> dict[str, Any]:
+    """Fetch one page of order history via the diner ``search_listing`` endpoint.
+
+    The legacy ``/diners/{id}/orders`` endpoint only ever returns the most
+    recent ~25 orders and carries no pagination metadata, so the full history is
+    unreachable through it. ``search_listing`` is what the Grubhub web app uses:
+    it honors ``pageNum``/``pageSize`` and returns a ``pager`` with
+    ``total_pages``. Results are normalized back to ``{"orders": [...]}`` so the
+    rest of the module is unchanged, with the ``pager`` passed through.
+
+    Adapted from upstream PR aserper/grubhub-mcp#9 by karbassi.
+    """
+    data = await client.get(
+        f"/diners/{client.session.diner_udid}/search_listing",
+        params=[
+            ("pageNum", page_num),
+            ("pageSize", page_size),
+            ("facet", "scheduled:false"),
+            ("facet", "orderType:ALL"),
+            ("includePartnerOrders", "true"),
+            ("sorts", "default"),
+        ],
+    )
+    if not isinstance(data, dict):
+        return {"orders": [], "pager": {}}
+
+    results = data.get("results")
+    partner = data.get("partner_results")
+    orders = (results if isinstance(results, list) else []) + (
+        partner if isinstance(partner, list) else []
+    )
+    pager = data.get("pager")
+    return {"orders": orders, "pager": pager if isinstance(pager, dict) else {}}
 
 
-def _require_authenticated(client: Any, action: str) -> str | None:
-    if not client.session.is_authenticated or not client.session.diner_udid:
-        return json.dumps({"error": f"Must be logged in to {action}"})
-    return None
+def _matches_order(order: Any, order_id: str) -> bool:
+    return isinstance(order, dict) and (
+        order.get("id") == order_id or order.get("group_id") == order_id
+    )
 
 
 async def _find_order_in_history(client: Any, order_id: str) -> dict[str, Any] | None:
-    history = await _fetch_order_history_raw(client)
-    orders = history.get("orders", []) if isinstance(history, dict) else []
-    return next(
-        (
-            order
-            for order in orders
-            if order.get("id") == order_id or order.get("group_id") == order_id
-        ),
-        None,
-    )
+    """Walk the paginated history looking for one order.
+
+    Stops at the reported ``total_pages``, at the first empty/short page when
+    the API gives no pager, and unconditionally at ``MAX_HISTORY_PAGES``.
+    """
+    page_size = DEFAULT_HISTORY_PAGE_SIZE
+    page = 1
+    total_pages = 1
+    while page <= total_pages and page <= MAX_HISTORY_PAGES:
+        history = await _fetch_order_history_raw(
+            client, page_size=page_size, page_num=page
+        )
+        orders = history.get("orders") or []
+        for order in orders:
+            if _matches_order(order, order_id):
+                return order
+
+        if not orders:
+            break
+
+        reported = (history.get("pager") or {}).get("total_pages")
+        if isinstance(reported, int) and not isinstance(reported, bool) and reported > 0:
+            total_pages = reported
+        elif len(orders) >= page_size:
+            # No usable pager — keep walking while pages come back full.
+            total_pages = page + 1
+        else:
+            total_pages = page
+        page += 1
+    return None
 
 
 def _build_cart_payload_from_order(order: dict[str, Any]) -> dict[str, Any]:
     restaurants = order.get("restaurants") or []
-    if not restaurants:
+    if not restaurants or not isinstance(restaurants[0], dict):
         raise ValueError("Order does not include restaurant metadata")
+
+    restaurant_id = restaurants[0].get("id") or restaurants[0].get("restaurant_id")
+    if not restaurant_id:
+        raise ValueError("Order does not include a usable restaurant id")
 
     charges = order.get("charges") or {}
     line_items = (charges.get("lines") or {}).get("line_items") or []
@@ -46,12 +120,15 @@ def _build_cart_payload_from_order(order: dict[str, Any]) -> dict[str, Any]:
 
     payload_line_items: list[dict[str, Any]] = []
     for item in line_items:
+        if not isinstance(item, dict):
+            raise ValueError("Order line item has an unexpected shape")
         menu_item_id = item.get("menu_item_id") or item.get("id")
         if not menu_item_id:
             raise ValueError("Order line item is missing menu_item_id")
+        quantity = item.get("quantity")
         payload_item: dict[str, Any] = {
             "menu_item_id": str(menu_item_id),
-            "quantity": item.get("quantity", 1),
+            "quantity": quantity if isinstance(quantity, int) and quantity > 0 else 1,
         }
         if item.get("special_instructions"):
             payload_item["special_instructions"] = item["special_instructions"]
@@ -63,7 +140,7 @@ def _build_cart_payload_from_order(order: dict[str, Any]) -> dict[str, Any]:
     order_type = fulfillment_info.get("type", "DELIVERY")
     payload: dict[str, Any] = {
         "brand": "GRUBHUB",
-        "restaurant_id": str(restaurants[0]["id"]),
+        "restaurant_id": str(restaurant_id),
         "line_items": payload_line_items,
         "order_type": order_type,
     }
@@ -82,44 +159,35 @@ def _build_cart_payload_from_order(order: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def _paginate_orders(data: dict[str, Any], page_size: int, page_num: int) -> dict[str, Any]:
-    orders = data.get("orders")
-    if not isinstance(orders, list):
-        return data
-
-    page_size = max(page_size, 1)
-    page_num = max(page_num, 0)
-    start = page_num * page_size
-    end = start + page_size
-    paged_orders = orders[start:end]
-    return {
-        "orders": paged_orders,
-        "pagination": {
-            "page_size": page_size,
-            "page_num": page_num,
-            "returned": len(paged_orders),
-            "total_orders": len(orders),
-            "server_side_pagination_honored": len(orders) <= page_size,
-        },
-    }
-
-
 def register(mcp: FastMCP) -> None:
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Place order (charges payment method)",
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=True,
+        )
+    )
+    @handle_api_errors
     async def place_order(
         cart_id: str,
         payment_method_id: str | None = None,
         tip_amount: float | None = None,
     ) -> str:
-        """Place an order from a cart. Requires authentication.
+        """Submit a cart as a real order. THIS SPENDS REAL MONEY: it charges the
+        saved payment method immediately and sends the order to the restaurant.
+        It cannot be undone from this server. Only call it after the user has
+        seen the cart total and explicitly confirmed this exact order.
 
         Args:
             cart_id: The cart ID to submit as an order
-            payment_method_id: ID of the payment method to use (uses default if not specified)
-            tip_amount: Optional tip amount in dollars
+            payment_method_id: ID of the payment method to charge (uses the
+                account default if not specified)
+            tip_amount: Optional tip amount in dollars, charged with the order
         """
         client = get_client()
-        auth_error = _require_authenticated(client, "place an order")
+        auth_error = require_authenticated(client, "place an order")
         if auth_error:
             return auth_error
 
@@ -127,20 +195,28 @@ def register(mcp: FastMCP) -> None:
         if payment_method_id:
             payload["payment_method_id"] = payment_method_id
         if tip_amount is not None:
-            payload["tip_amount"] = int(tip_amount * 100)
+            payload["tip_amount"] = to_cents(tip_amount)
 
         data = await client.post(f"/carts/{cart_id}/submit", data=payload)
-        return json.dumps(data, indent=2)
+        return json_result(data)
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Get order",
+            readOnlyHint=True,
+            idempotentHint=True,
+            openWorldHint=True,
+        )
+    )
+    @handle_api_errors
     async def get_order(order_id: str) -> str:
-        """Get details for a specific order.
+        """Get details for a specific order. Requires authentication.
 
         Args:
             order_id: The order ID
         """
         client = get_client()
-        auth_error = _require_authenticated(client, "view order details")
+        auth_error = require_authenticated(client, "view order details")
         if auth_error:
             return auth_error
         try:
@@ -153,26 +229,66 @@ def register(mcp: FastMCP) -> None:
             if match is None:
                 raise
             data = match
-        return json.dumps(data, indent=2)
+        return json_result(data)
 
-    @mcp.tool()
-    async def get_order_history(page_size: int = 10, page_num: int = 0) -> str:
-        """Get past order history. Requires authentication.
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Get order history",
+            readOnlyHint=True,
+            idempotentHint=True,
+            openWorldHint=True,
+        )
+    )
+    @handle_api_errors
+    async def get_order_history(
+        page_size: int = DEFAULT_HISTORY_PAGE_SIZE, page_num: int = 1
+    ) -> str:
+        """Get past order history (paginated). Requires authentication.
+
+        Pagination is server-side, so the full history is reachable — iterate
+        page_num from 1 up to pagination.total_pages in the response.
 
         Args:
-            page_size: Number of orders per page (default 10)
-            page_num: Page number (default 0)
+            page_size: Orders per page (default 20, max 100)
+            page_num: 1-based page number (default 1)
         """
         client = get_client()
-        auth_error = _require_authenticated(client, "view order history")
+        auth_error = require_authenticated(client, "view order history")
         if auth_error:
             return auth_error
 
-        data = await _fetch_order_history_raw(client)
-        data = _paginate_orders(data, page_size=page_size, page_num=page_num)
-        return json.dumps(data, indent=2)
+        page_size = require_int(
+            page_size, "page_size", minimum=1, maximum=MAX_HISTORY_PAGE_SIZE
+        )
+        page_num = require_int(page_num, "page_num", minimum=1)
 
-    @mcp.tool()
+        data = await _fetch_order_history_raw(
+            client, page_size=page_size, page_num=page_num
+        )
+        orders = data.get("orders") or []
+        pager = data.get("pager") or {}
+        return json_result(
+            {
+                "orders": orders,
+                "pagination": {
+                    "page_size": page_size,
+                    "page_num": page_num,
+                    "returned": len(orders),
+                    "total_pages": pager.get("total_pages"),
+                    "current_page": pager.get("current_page"),
+                },
+            }
+        )
+
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Track order",
+            readOnlyHint=True,
+            idempotentHint=True,
+            openWorldHint=True,
+        )
+    )
+    @handle_api_errors
     async def track_order(order_id: str) -> str:
         """Get real-time tracking info for an active order.
 
@@ -180,21 +296,31 @@ def register(mcp: FastMCP) -> None:
             order_id: The order ID to track
         """
         client = get_client()
-        auth_error = _require_authenticated(client, "track an order")
+        auth_error = require_authenticated(client, "track an order")
         if auth_error:
             return auth_error
         data = await client.get(f"/orders/{order_id}/tracking")
-        return json.dumps(data, indent=2)
+        return json_result(data)
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Reorder into a new cart",
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=True,
+        )
+    )
+    @handle_api_errors
     async def reorder(order_id: str) -> str:
-        """Create a new cart from a previous order for easy reordering.
+        """Create a new cart from a previous order. Only builds a cart — nothing
+        is charged until place_order is called.
 
         Args:
             order_id: The order ID to reorder
         """
         client = get_client()
-        auth_error = _require_authenticated(client, "reorder")
+        auth_error = require_authenticated(client, "reorder")
         if auth_error:
             return auth_error
 
@@ -206,25 +332,38 @@ def register(mcp: FastMCP) -> None:
 
             match = await _find_order_in_history(client, order_id)
             if match is None:
-                raise
+                return error_result(
+                    f"Order {order_id} was not found in your order history",
+                    status_code=404,
+                )
             payload = _build_cart_payload_from_order(match)
             data = await client.post("/carts", data=payload)
-        return json.dumps(data, indent=2)
+        return json_result(data)
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Add post-delivery tip (charges payment method)",
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=True,
+        )
+    )
+    @handle_api_errors
     async def post_delivery_tip(order_id: str, tip_amount: float) -> str:
-        """Add or update the tip after delivery.
+        """Add or update the tip after delivery. THIS SPENDS REAL MONEY: it
+        charges the additional tip to the payment method used for the order.
 
         Args:
             order_id: The order ID
-            tip_amount: Tip amount in dollars
+            tip_amount: Tip amount in dollars (e.g. 5.25)
         """
         client = get_client()
-        auth_error = _require_authenticated(client, "add a post-delivery tip")
+        auth_error = require_authenticated(client, "add a post-delivery tip")
         if auth_error:
             return auth_error
         data = await client.post(
             f"/orders/{order_id}/tip",
-            data={"tip_amount": int(tip_amount * 100)},
+            data={"tip_amount": to_cents(tip_amount)},
         )
-        return json.dumps(data, indent=2)
+        return json_result(data)
