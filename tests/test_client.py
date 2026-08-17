@@ -387,6 +387,27 @@ class RequestPipelineTests(SessionDirTestCase):
 
         self.assertNotIn("Authorization", seen[0].headers)
 
+    async def test_request_headers_are_the_expected_set(self):
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json={})
+
+        client = _mock_client(handler)
+        client.session.auth_token = "tok"
+        try:
+            await client.get("/carts/1")
+        finally:
+            await client.close()
+
+        headers = seen[0].headers
+        self.assertEqual(headers["Authorization"], "Bearer tok")
+        self.assertEqual(headers["x-gh-browser-id"], client.session.browser_id)
+        # Vary is a *response* header; sending it as a request header was
+        # meaningless and has been removed.
+        self.assertNotIn("Vary", headers)
+
 
 class ErrorHelperTests(unittest.IsolatedAsyncioTestCase):
     async def test_http_status_error_becomes_structured_json(self):
@@ -465,6 +486,44 @@ class ErrorHelperTests(unittest.IsolatedAsyncioTestCase):
             to_cents("5")
 
 
+class PackagingTests(unittest.TestCase):
+    """The Claude Code plugin manifest must not drift from the package version.
+
+    python-semantic-release keeps these in sync via `version_variables`; this
+    guards against the config being dropped or the pattern silently failing.
+    """
+
+    def test_plugin_manifest_version_matches_pyproject(self):
+        import tomllib
+
+        repo_root = Path(__file__).resolve().parent.parent
+        pyproject = repo_root / "pyproject.toml"
+        manifest = repo_root / ".claude-plugin" / "plugin.json"
+        if not pyproject.exists() or not manifest.exists():
+            self.skipTest("not running from a source checkout")
+
+        with pyproject.open("rb") as handle:
+            package_version = tomllib.load(handle)["project"]["version"]
+        manifest_version = json.loads(manifest.read_text())["version"]
+
+        self.assertEqual(manifest_version, package_version)
+
+    def test_semantic_release_is_configured_to_stamp_the_manifest(self):
+        import tomllib
+
+        repo_root = Path(__file__).resolve().parent.parent
+        pyproject = repo_root / "pyproject.toml"
+        if not pyproject.exists():
+            self.skipTest("not running from a source checkout")
+
+        with pyproject.open("rb") as handle:
+            config = tomllib.load(handle)["tool"]["semantic_release"]
+
+        self.assertIn(
+            ".claude-plugin/plugin.json:version", config.get("version_variables", [])
+        )
+
+
 class ServerSmokeTests(unittest.IsolatedAsyncioTestCase):
     async def test_all_tools_register_with_annotations(self):
         from grubhub_mcp.server import mcp
@@ -481,6 +540,13 @@ class ServerSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(by_name["get_order_history"].annotations.readOnlyHint)
         # Ordering tools must warn about spending money in the model-facing text.
         self.assertIn("REAL MONEY", by_name["place_order"].description)
+
+        # The money-spending tools are two-step and default to not charging.
+        for name in ("place_order", "post_delivery_tip"):
+            with self.subTest(tool=name):
+                schema = by_name[name].inputSchema["properties"]["confirm"]
+                self.assertIs(schema["default"], False)
+                self.assertIn("confirm=true", by_name[name].description)
 
 
 if __name__ == "__main__":

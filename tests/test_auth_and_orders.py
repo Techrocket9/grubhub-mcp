@@ -9,6 +9,7 @@ from unittest.mock import patch
 import httpx
 
 from grubhub_mcp import auth as auth_module
+from grubhub_mcp.tools import _common
 from grubhub_mcp.tools import account as account_tools
 from grubhub_mcp.tools import auth as auth_tools
 from grubhub_mcp.tools import cart as cart_tools
@@ -57,6 +58,9 @@ class FakeClient:
         self.post_calls: list[tuple[str, dict | None, bool, object]] = []
         self.delete_calls: list[str] = []
         self.ensure_session_calls = 0
+        # Cart responses for the place_order confirmation preview.
+        self.cart_response: dict | None = None
+        self.cart_error: Exception | None = None
 
     async def ensure_session(self) -> None:
         self.ensure_session_calls += 1
@@ -84,6 +88,10 @@ class FakeClient:
             return self._search_listing(dict(params or []))
         if path.startswith("/restaurants/v4/"):
             return {"restaurant_id": path.rsplit("/", 1)[-1], "params": dict(params or {})}
+        if path.startswith("/carts/"):
+            if self.cart_error is not None:
+                raise self.cart_error
+            return self.cart_response if self.cart_response is not None else {}
         raise AssertionError(f"unexpected GET path: {path}")
 
     def _search_listing(self, params: dict) -> dict:
@@ -122,6 +130,8 @@ class FakeClient:
             return {"status": "ok"}
         if path.startswith("/orders/") and path.endswith("/tip"):
             return {"status": "tipped"}
+        if path.startswith("/carts/") and path.endswith("/submit"):
+            return {"order_id": "order-999", "status": "placed"}
         raise AssertionError(f"unexpected POST path: {path}")
 
     async def delete(self, path: str, auth_required: bool = True, params=None):
@@ -423,7 +433,7 @@ class MoneyAndValidationTests(unittest.IsolatedAsyncioTestCase):
         mcp = _register(order_tools)
 
         with patch("grubhub_mcp.tools.order.get_client", return_value=client):
-            await mcp.tools["post_delivery_tip"]("order-1", 8.35)
+            await mcp.tools["post_delivery_tip"]("order-1", 8.35, confirm=True)
 
         path, payload, _, _ = client.post_calls[0]
         self.assertEqual(path, "/orders/order-1/tip")
@@ -557,6 +567,265 @@ class EnvVarLoginTests(unittest.IsolatedAsyncioTestCase):
             await mcp.tools["login"]("arg@example.com", "argpass")
 
         self.assertEqual(seen, {"email": "arg@example.com", "password": "argpass"})
+
+
+RECOGNISABLE_CART = {
+    "id": "cart-1",
+    "restaurant_id": "11278616",
+    "order_type": "DELIVERY",
+    "restaurants": [{"id": "11278616", "name": "Pizza Place", "phone": "555"}],
+    "lines": {"line_items": [{"name": "Margherita", "quantity": 2}]},
+    "charges": {
+        "total": {"amount": 2345},
+        "tip": {"amount": 400},
+        "lines": {"line_items": [{"name": "Margherita", "quantity": 2}]},
+    },
+}
+
+
+class PlaceOrderConfirmationTests(unittest.IsolatedAsyncioTestCase):
+    def _tools(self, client: FakeClient):
+        return _register(order_tools).tools
+
+    async def test_unconfirmed_call_charges_nothing(self):
+        client = FakeClient()
+        client.cart_response = RECOGNISABLE_CART
+        tools = self._tools(client)
+
+        with patch("grubhub_mcp.tools.order.get_client", return_value=client):
+            raw = await tools["place_order"]("cart-1")
+
+        data = json.loads(raw)
+        self.assertEqual(data["status"], "confirmation_required")
+        self.assertEqual(data["cart_id"], "cart-1")
+        self.assertIn("confirm=true", data["message"])
+        # Nothing was submitted.
+        self.assertEqual(client.post_calls, [])
+        # The cart was fetched so the model can show it to the user.
+        self.assertEqual(client.get_calls[0][0], "/carts/cart-1")
+
+    async def test_unconfirmed_call_summarises_a_recognisable_cart(self):
+        client = FakeClient()
+        client.cart_response = RECOGNISABLE_CART
+        tools = self._tools(client)
+
+        with patch("grubhub_mcp.tools.order.get_client", return_value=client):
+            data = json.loads(await tools["place_order"]("cart-1"))
+
+        summary = data["cart_summary"]
+        self.assertEqual(summary["restaurant"], {"id": "11278616", "name": "Pizza Place"})
+        self.assertEqual(summary["line_items"], [{"name": "Margherita", "quantity": 2}])
+        self.assertEqual(summary["order_type"], "DELIVERY")
+        # Money is passed through verbatim, and the duplicated line block is dropped.
+        self.assertEqual(summary["charges"]["total"], {"amount": 2345})
+        self.assertNotIn("lines", summary["charges"])
+        self.assertNotIn("cart", data)
+
+    async def test_unrecognisable_cart_is_returned_raw(self):
+        client = FakeClient()
+        client.cart_response = {"something": "unexpected"}
+        tools = self._tools(client)
+
+        with patch("grubhub_mcp.tools.order.get_client", return_value=client):
+            data = json.loads(await tools["place_order"]("cart-1"))
+
+        self.assertEqual(data["status"], "confirmation_required")
+        self.assertEqual(data["cart"], {"something": "unexpected"})
+        self.assertNotIn("cart_summary", data)
+
+    async def test_cart_fetch_http_error_still_asks_for_confirmation(self):
+        client = FakeClient()
+        request = httpx.Request("GET", "https://api-gtm.grubhub.com/carts/cart-1")
+        client.cart_error = httpx.HTTPStatusError(
+            "gone",
+            request=request,
+            response=httpx.Response(404, request=request, text="no such cart"),
+        )
+        tools = self._tools(client)
+
+        with patch("grubhub_mcp.tools.order.get_client", return_value=client):
+            data = json.loads(await tools["place_order"]("cart-1"))
+
+        self.assertEqual(data["status"], "confirmation_required")
+        self.assertEqual(data["cart_error"]["status_code"], 404)
+        self.assertIn("no such cart", data["cart_error"]["detail"])
+        self.assertEqual(client.post_calls, [])
+
+    async def test_cart_fetch_transport_error_still_asks_for_confirmation(self):
+        client = FakeClient()
+        client.cart_error = httpx.ConnectError("no route to host")
+        tools = self._tools(client)
+
+        with patch("grubhub_mcp.tools.order.get_client", return_value=client):
+            data = json.loads(await tools["place_order"]("cart-1"))
+
+        self.assertEqual(data["status"], "confirmation_required")
+        self.assertIn("no route to host", data["cart_error"]["detail"])
+        self.assertEqual(client.post_calls, [])
+
+    async def test_confirmed_call_submits_the_cart(self):
+        client = FakeClient()
+        client.cart_response = RECOGNISABLE_CART
+        tools = self._tools(client)
+
+        with patch("grubhub_mcp.tools.order.get_client", return_value=client):
+            data = json.loads(
+                await tools["place_order"](
+                    "cart-1", payment_method_id="pm-1", tip_amount=4.15, confirm=True
+                )
+            )
+
+        self.assertEqual(data["order_id"], "order-999")
+        path, payload, _, _ = client.post_calls[0]
+        self.assertEqual(path, "/carts/cart-1/submit")
+        self.assertEqual(payload, {"payment_method_id": "pm-1", "tip_amount": 415})
+        # No preview fetch on the confirmed call.
+        self.assertEqual(client.get_calls, [])
+
+    async def test_preview_reports_the_tip_that_would_be_charged(self):
+        client = FakeClient()
+        client.cart_response = RECOGNISABLE_CART
+        tools = self._tools(client)
+
+        with patch("grubhub_mcp.tools.order.get_client", return_value=client):
+            data = json.loads(await tools["place_order"]("cart-1", tip_amount=1.15))
+
+        self.assertEqual(data["tip"], {"dollars": 1.15, "cents": 115})
+
+    async def test_invalid_tip_is_rejected_before_the_preview(self):
+        client = FakeClient()
+        tools = self._tools(client)
+
+        with patch("grubhub_mcp.tools.order.get_client", return_value=client):
+            data = json.loads(await tools["place_order"]("cart-1", tip_amount=-5))
+
+        self.assertIn("negative", data["error"])
+        self.assertEqual(client.get_calls, [])
+        self.assertEqual(client.post_calls, [])
+
+    async def test_auth_guard_runs_before_the_preview(self):
+        client = FakeClient()
+        client.session.is_authenticated = False
+        client.session.diner_udid = None
+        tools = self._tools(client)
+
+        with patch("grubhub_mcp.tools.order.get_client", return_value=client):
+            data = json.loads(await tools["place_order"]("cart-1"))
+
+        self.assertEqual(data, {"error": "Must be logged in to place an order"})
+        self.assertEqual(client.get_calls, [])
+
+
+class PostDeliveryTipConfirmationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unconfirmed_call_charges_nothing(self):
+        client = FakeClient()
+        mcp = _register(order_tools)
+
+        with patch("grubhub_mcp.tools.order.get_client", return_value=client):
+            data = json.loads(await mcp.tools["post_delivery_tip"]("order-7", 6.25))
+
+        self.assertEqual(data["status"], "confirmation_required")
+        self.assertEqual(data["order_id"], "order-7")
+        self.assertEqual(data["tip"], {"dollars": 6.25, "cents": 625})
+        self.assertIn("$6.25", data["message"])
+        self.assertIn("confirm=true", data["message"])
+        self.assertEqual(client.post_calls, [])
+
+    async def test_confirmed_call_charges_the_tip(self):
+        client = FakeClient()
+        mcp = _register(order_tools)
+
+        with patch("grubhub_mcp.tools.order.get_client", return_value=client):
+            data = json.loads(
+                await mcp.tools["post_delivery_tip"]("order-7", 6.25, confirm=True)
+            )
+
+        self.assertEqual(data["status"], "tipped")
+        self.assertEqual(client.post_calls[0][0], "/orders/order-7/tip")
+        self.assertEqual(client.post_calls[0][1], {"tip_amount": 625})
+
+    async def test_invalid_tip_is_rejected_before_confirmation(self):
+        client = FakeClient()
+        mcp = _register(order_tools)
+
+        with patch("grubhub_mcp.tools.order.get_client", return_value=client):
+            data = json.loads(await mcp.tools["post_delivery_tip"]("order-7", -1))
+
+        self.assertIn("negative", data["error"])
+        self.assertEqual(client.post_calls, [])
+
+
+class TipCapTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self._saved = os.environ.pop(_common.MAX_TIP_ENV_VAR, None)
+
+    def tearDown(self) -> None:
+        if self._saved is None:
+            os.environ.pop(_common.MAX_TIP_ENV_VAR, None)
+        else:
+            os.environ[_common.MAX_TIP_ENV_VAR] = self._saved
+
+    def test_default_cap_is_250_dollars(self):
+        self.assertEqual(_common.max_tip_dollars(), 250.0)
+        self.assertEqual(_common.tip_to_cents(250.0), 25_000)
+        with self.assertRaises(ValueError) as ctx:
+            _common.tip_to_cents(250.01)
+        message = str(ctx.exception)
+        self.assertIn("$250.00", message)
+        self.assertIn(_common.MAX_TIP_ENV_VAR, message)
+
+    def test_environment_variable_raises_the_cap(self):
+        os.environ[_common.MAX_TIP_ENV_VAR] = "500"
+        self.assertEqual(_common.max_tip_dollars(), 500.0)
+        self.assertEqual(_common.tip_to_cents(300), 30_000)
+        with self.assertRaises(ValueError):
+            _common.tip_to_cents(500.01)
+
+    def test_environment_variable_can_lower_the_cap(self):
+        os.environ[_common.MAX_TIP_ENV_VAR] = "10.50"
+        self.assertEqual(_common.tip_to_cents(10.5), 1050)
+        with self.assertRaises(ValueError):
+            _common.tip_to_cents(11)
+
+    def test_invalid_environment_values_fall_back_to_the_default(self):
+        for value in ("", "  ", "abc", "-5", "0", "nan", "inf", "1,000"):
+            with self.subTest(value=value):
+                os.environ[_common.MAX_TIP_ENV_VAR] = value
+                self.assertEqual(_common.max_tip_dollars(), 250.0)
+
+    async def test_set_tip_enforces_the_cap(self):
+        client = FakeClient()
+        mcp = _register(cart_tools)
+
+        with patch("grubhub_mcp.tools.cart.get_client", return_value=client):
+            data = json.loads(await mcp.tools["set_tip"]("cart-1", 1000.0))
+
+        self.assertIn("safety cap", data["error"])
+        self.assertEqual(client.put_calls, [])
+
+    async def test_place_order_enforces_the_cap(self):
+        client = FakeClient()
+        mcp = _register(order_tools)
+
+        with patch("grubhub_mcp.tools.order.get_client", return_value=client):
+            data = json.loads(
+                await mcp.tools["place_order"]("cart-1", tip_amount=999, confirm=True)
+            )
+
+        self.assertIn("safety cap", data["error"])
+        self.assertEqual(client.post_calls, [])
+
+    async def test_post_delivery_tip_enforces_the_cap(self):
+        client = FakeClient()
+        mcp = _register(order_tools)
+
+        with patch("grubhub_mcp.tools.order.get_client", return_value=client):
+            data = json.loads(
+                await mcp.tools["post_delivery_tip"]("order-1", 999, confirm=True)
+            )
+
+        self.assertIn("safety cap", data["error"])
+        self.assertEqual(client.post_calls, [])
 
 
 if __name__ == "__main__":
