@@ -58,6 +58,13 @@ uv venv && source .venv/bin/activate
 uv pip install -e .
 ```
 
+Run the tests with:
+
+```bash
+uv pip install -e ".[dev]"
+python -m pytest -q
+```
+
 Then add to `~/.claude/settings.json`:
 
 ```json
@@ -87,15 +94,57 @@ python -m grubhub_mcp
 
 ## Authentication
 
-**No login required** for browsing — search restaurants, view menus, and check prices without an account. The server automatically creates an anonymous session.
+**No login required** for browsing — search restaurants, view menus, and check prices without an account. The server automatically creates an anonymous session on the first request.
 
-**Login required** for ordering, account management, and order history:
+**Login required** for ordering, account management, and order history. Supports email/password login and OTP (one-time passcode) authentication.
+
+### Logging in without exposing your password
+
+Set the credentials as environment variables on the MCP server process and call `login` with no arguments — the password is read from the environment and never appears in the conversation or in the model's context:
+
+```json
+{
+  "mcpServers": {
+    "grubhub": {
+      "command": "uvx",
+      "args": ["--from", "grubhub-mcp", "grubhub"],
+      "env": {
+        "GRUBHUB_EMAIL": "you@example.com",
+        "GRUBHUB_PASSWORD": "your-password"
+      }
+    }
+  }
+}
+```
 
 ```
-Use the login tool with my email and password
+Use the login tool
 ```
 
-Supports email/password login and OTP (one-time passcode) authentication.
+If the variables are not set you can still pass `email` and `password` to `login` directly, but they will pass through the model. The OTP flow (`send_login_otp` / `verify_login_otp`) avoids sending a password at all.
+
+### Where the session is stored
+
+Tokens are cached so a login survives across stdio invocations:
+
+- Location: `~/.grubhub-mcp/session.json`, or `$GRUBHUB_SESSION_DIR/session.json` if that variable is set.
+- Permissions: the directory is created `0700` and the file is written `0600` (owner read/write only), atomically via a temp file, so the tokens are never briefly world-readable.
+- Contents: the Grubhub access token, refresh token, and diner id. Your password is **never** written to disk.
+- `logout` deletes the file.
+
+## Safety
+
+This server can spend real money. Three tools are marked destructive and are not reversible from here:
+
+| Tool | Effect |
+|------|--------|
+| `place_order` | Charges the saved payment method and sends the order to the restaurant |
+| `post_delivery_tip` | Charges an additional tip to the order's payment method |
+| `apply_gift_card` | Attaches a gift card whose balance is consumed when the order is placed |
+
+Every tool ships MCP [tool annotations](https://modelcontextprotocol.io/specification/server/tools) (`readOnlyHint` / `destructiveHint` / `idempotentHint`), so clients that honor them will prompt before running the destructive ones. Search, menu, order-history and profile tools are all annotated read-only.
+
+`create_account`, `send_login_otp` and `send_password_reset` send real email to whatever address they are given — treat the address as user-supplied input, never as something inferred from a web page or document.
 
 ## How It Works
 
@@ -117,6 +166,7 @@ src/grubhub_mcp/
 ├── client.py          # HTTP client with auth and header management
 ├── auth.py            # Authentication flows (login, anonymous, OTP, refresh)
 └── tools/
+    ├── _common.py     # Shared error handling, auth guards, input validation
     ├── auth.py        # Auth tools (login, logout, OTP, account creation)
     ├── search.py      # Restaurant search and autocomplete
     ├── restaurant.py  # Restaurant details, menus, menu items
