@@ -2,6 +2,72 @@
 
 <!-- version list -->
 
+## v2.0.0 (2026-08-17)
+
+### Bug Fixes
+
+- Harden session storage, token refresh, and request authentication
+  ([`210b21f`](https://github.com/Techrocket9/grubhub-mcp/commit/210b21f43ce7e351e0aa8e7b7cfaeed8697ea2f8))
+
+- Paginate order history server-side so the full history is reachable
+  ([`4bd0ece`](https://github.com/Techrocket9/grubhub-mcp/commit/4bd0ece775b6376f034ea17693bcb51e0fa219f1))
+
+- **deps**: Pin mcp to the 1.x line that still ships FastMCP
+  ([`f7910c5`](https://github.com/Techrocket9/grubhub-mcp/commit/f7910c510dc0d3774ad57782db7ba29a218ace5d))
+
+### Chores
+
+- Keep the plugin manifest version in sync with the package
+  ([`3a456c1`](https://github.com/Techrocket9/grubhub-mcp/commit/3a456c1ed60b436dcbe4f3ec4ffce71680178689))
+
+### Continuous Integration
+
+- Scope write permissions to the release job only
+  ([`b792ec5`](https://github.com/Techrocket9/grubhub-mcp/commit/b792ec54c67d0b4a0ea403849b4bed0bcccf0991))
+
+- Test on 3.11 and 3.12 before releasing, and tolerate forks
+  ([`9320f03`](https://github.com/Techrocket9/grubhub-mcp/commit/9320f0351fcb9aa525dbdcbdaf4770f03b517c89))
+
+### Documentation
+
+- Document session storage, env-var login, and money-spending tools
+  ([`055a9c5`](https://github.com/Techrocket9/grubhub-mcp/commit/055a9c5615ad5d47c6c56713f0701d99bdd77bdd))
+
+- Document the confirmation gate and the tip cap
+  ([`e160bd6`](https://github.com/Techrocket9/grubhub-mcp/commit/e160bd6bee759e190cf39474a15e34c6431b29ef))
+
+- Point install instructions and plugin manifest at this fork
+  ([`88f48dc`](https://github.com/Techrocket9/grubhub-mcp/commit/88f48dcf8ce4af2db71cd3a4dea437836d77b7af))
+
+### Features
+
+- Add safety annotations, structured errors, and input validation
+  ([`193d2e4`](https://github.com/Techrocket9/grubhub-mcp/commit/193d2e478974a546bd0ed8ac3e97704b263597eb))
+
+- Cap tip amounts at a configurable maximum
+  ([`ae2ad31`](https://github.com/Techrocket9/grubhub-mcp/commit/ae2ad31d47a9edb83532a93634959f4c7414ee37))
+
+- Require explicit confirmation before charging money
+  ([`d692d1b`](https://github.com/Techrocket9/grubhub-mcp/commit/d692d1be66e43138bf52a80291168bf5536e17b0))
+
+### Refactoring
+
+- Stop sending Vary as a request header
+  ([`d0f6abc`](https://github.com/Techrocket9/grubhub-mcp/commit/d0f6abc75a33412139201cbf18193597a67b854a))
+
+### Testing
+
+- Cover confirmation gating, the tip cap, and version sync
+  ([`a2528f2`](https://github.com/Techrocket9/grubhub-mcp/commit/a2528f21a73898a0b69fe80ba8520d63949f8d2f))
+
+- Cover session storage, auth recovery, pagination, and validation
+  ([`156eb39`](https://github.com/Techrocket9/grubhub-mcp/commit/156eb390b360f76489faa2c2ee6efd5369769475))
+
+### Breaking Changes
+
+- Place_order and post_delivery_tip no longer charge anything unless called with confirm=true.
+
+
 ## v1.1.6 (2026-05-06)
 
 ### Bug Fixes
