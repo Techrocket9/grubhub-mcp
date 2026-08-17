@@ -142,6 +142,27 @@ This server can spend real money. Three tools are marked destructive and are not
 | `post_delivery_tip` | Charges an additional tip to the order's payment method |
 | `apply_gift_card` | Attaches a gift card whose balance is consumed when the order is placed |
 
+### Two-step confirmation
+
+`place_order` and `post_delivery_tip` take a `confirm` parameter that defaults to `false`. Called without it, they **charge nothing** and instead return:
+
+```json
+{
+  "status": "confirmation_required",
+  "message": "Nothing has been ordered or charged yet. Show the cart contents and total below to the user, ...",
+  "cart_id": "...",
+  "cart_summary": { "restaurant": {...}, "line_items": [...], "charges": {...} }
+}
+```
+
+The assistant is expected to show that preview to you and get your explicit yes before calling again with `confirm=true`. Money values in the preview are passed through from the API verbatim rather than reformatted, so a units mismatch can't turn into a confidently wrong total; when the cart doesn't match a recognized shape the whole cart is returned instead. If the cart can't be fetched at all, the call still refuses to charge and reports why.
+
+### Tip cap
+
+Tips are capped at **$250** by default (`set_tip`, `place_order`, `post_delivery_tip`), so a mistyped or runaway amount is rejected rather than charged. Raise or lower it with `GRUBHUB_MAX_TIP_DOLLARS` on the server process; anything unparseable, non-positive or non-finite falls back to the default.
+
+### Annotations
+
 Every tool ships MCP [tool annotations](https://modelcontextprotocol.io/specification/server/tools) (`readOnlyHint` / `destructiveHint` / `idempotentHint`), so clients that honor them will prompt before running the destructive ones. Search, menu, order-history and profile tools are all annotated read-only.
 
 `create_account`, `send_login_otp` and `send_password_reset` send real email to whatever address they are given — treat the address as user-supplied input, never as something inferred from a web page or document.
