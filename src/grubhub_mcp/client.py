@@ -257,7 +257,6 @@ class GrubhubClient:
             "Accept": "application/json",
             "Content-Type": "application/json",
             "x-gh-browser-id": self.session.browser_id,
-            "Vary": "Accept-Encoding",
         }
         if self.session.auth_token and auth_required:
             headers["Authorization"] = f"Bearer {self.session.auth_token}"
