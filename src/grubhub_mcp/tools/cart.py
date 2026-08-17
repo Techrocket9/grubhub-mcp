@@ -8,7 +8,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from ..client import get_client
-from ._common import handle_api_errors, json_result, require_int, to_cents
+from ._common import handle_api_errors, json_result, require_int, tip_to_cents
 
 MAX_QUANTITY = 100
 
@@ -224,8 +224,8 @@ def register(mcp: FastMCP) -> None:
     )
     @handle_api_errors
     async def set_tip(cart_id: str, tip_amount: float) -> str:
-        """Set the tip amount on the cart. Charged with the order when
-        place_order is called.
+        """Set the tip amount on the cart. Nothing is charged here — the tip is
+        charged with the order when place_order is called.
 
         Args:
             cart_id: The cart ID
@@ -234,6 +234,6 @@ def register(mcp: FastMCP) -> None:
         client = get_client()
         data = await client.put(
             f"/carts/{cart_id}/tip",
-            data={"tip_amount": to_cents(tip_amount)},  # cents
+            data={"tip_amount": tip_to_cents(tip_amount)},  # cents
         )
         return json_result(data)

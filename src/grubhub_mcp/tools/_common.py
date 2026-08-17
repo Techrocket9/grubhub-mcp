@@ -10,6 +10,7 @@ from __future__ import annotations
 import functools
 import json
 import math
+import os
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
@@ -18,6 +19,11 @@ import httpx
 # How much of an error response body to pass back to the caller. Bodies are the
 # API's own error payloads (never our request headers), but they can be large.
 MAX_DETAIL_CHARS = 2000
+
+# Safety net against a runaway or mistyped tip (e.g. 10 -> 1000). Raise it by
+# setting the environment variable on the MCP server process.
+DEFAULT_MAX_TIP_DOLLARS = 250.0
+MAX_TIP_ENV_VAR = "GRUBHUB_MAX_TIP_DOLLARS"
 
 F = TypeVar("F", bound=Callable[..., Awaitable[str]])
 
@@ -108,6 +114,37 @@ def to_cents(amount: Any, field: str = "tip_amount") -> int:
     if amount < 0:
         raise ValueError(f"{field} cannot be negative")
     return int(round(amount * 100))
+
+
+def max_tip_dollars() -> float:
+    """Current tip ceiling in dollars, from the environment or the default.
+
+    Parsed defensively: anything unparseable, non-finite or non-positive falls
+    back to the default rather than disabling the cap.
+    """
+    raw = os.environ.get(MAX_TIP_ENV_VAR)
+    if raw is None:
+        return DEFAULT_MAX_TIP_DOLLARS
+    try:
+        value = float(raw.strip())
+    except (AttributeError, TypeError, ValueError):
+        return DEFAULT_MAX_TIP_DOLLARS
+    if not math.isfinite(value) or value <= 0:
+        return DEFAULT_MAX_TIP_DOLLARS
+    return value
+
+
+def tip_to_cents(amount: Any, field: str = "tip_amount") -> int:
+    """Convert a tip in dollars to cents, refusing implausibly large tips."""
+    cents = to_cents(amount, field)
+    cap = max_tip_dollars()
+    if cents > int(round(cap * 100)):
+        raise ValueError(
+            f"{field} of ${cents / 100:,.2f} exceeds the ${cap:,.2f} safety cap. "
+            "If the user really means this amount, raise the cap by setting the "
+            f"{MAX_TIP_ENV_VAR} environment variable on the MCP server process."
+        )
+    return cents
 
 
 def require_int(value: Any, field: str, minimum: int = 1, maximum: int | None = None) -> int:
